@@ -4,14 +4,32 @@
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width,initial-scale=1">
 <title>Duel of Wizards</title>
-<link rel="stylesheet" href="css/style.css">
+<style>
+:root{--ink:#0d0a1f;--paper:#f3ecff;--ember:#ff8a3d;--arcane:#5ee7ff;--mag:#d946ef}
+*{box-sizing:border-box}
+html,body{margin:0;height:100%;background:var(--ink);color:var(--paper);font-family:Georgia,'Palatino Linotype',serif;overflow:hidden}
+canvas{display:block;width:100%;height:100%}
+video{display:none}
+#menu{position:fixed;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(13,10,31,.82);padding:16px}
+#panel{max-width:460px;width:100%;text-align:center}
+h1{font-size:clamp(34px,7vw,56px);margin:0 0 6px;letter-spacing:.02em;font-weight:700}
+#msg{font-size:20px;min-height:26px;margin:0 0 14px;color:var(--ember)}
+.how{text-align:left;font-size:15px;line-height:1.5;margin:14px 0;padding:12px 14px;border-left:3px solid var(--mag);background:rgba(255,255,255,.05)}
+button,input{font:inherit;font-size:17px;border-radius:8px;border:2px solid var(--mag);padding:11px 16px;background:transparent;color:var(--paper)}
+button{cursor:pointer;background:var(--mag);color:#fff;font-weight:700}
+button.alt{background:transparent}
+button:hover{filter:brightness(1.15)}
+button:focus-visible,input:focus-visible{outline:3px solid var(--arcane);outline-offset:2px}
+.row{display:flex;gap:8px;margin:8px 0}
+.row>*{flex:1;min-width:0}
+input{text-align:center;letter-spacing:.2em}
+#st{font-size:15px;min-height:40px;margin-top:10px;color:var(--arcane)}
+</style>
 </head>
 <body>
 <canvas id="c"></canvas>
 <video id="v" playsinline muted></video>
-<button id="mute" aria-label="Toggle sound">Sound on</button>
-
-<div id="menu" class="screen"><div class="panel">
+<div id="menu"><div id="panel">
   <h1>Duel of Wizards</h1>
   <p id="msg">Two wizards. One arena. Your hands are the spells.</p>
   <div class="how">
@@ -25,14 +43,246 @@
   <div class="row"><button id="b3" class="alt">Practice vs bot</button></div>
   <div id="st"></div>
 </div></div>
-
-<div id="over" class="screen" hidden><div class="panel">
-  <h1 id="result"></h1>
-  <p id="note"></p>
-  <div class="row"><button id="again">Rematch</button><button id="leave" class="alt">Main menu</button></div>
-</div></div>
-
 <script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
-<script type="module" src="js/main.js"></script>
+<script type="module">
+import {HandLandmarker,FilesetResolver} from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/vision_bundle.mjs";
+const $=id=>document.getElementById(id),cv=$('c'),ctx=cv.getContext('2d'),vid=$('v');
+const st=t=>$('st').textContent=t;
+let W,H,S;
+function rs(){W=cv.width=innerWidth;H=cv.height=innerHeight;S=Math.min(W,H)}
+addEventListener('resize',rs);rs();
+
+let hl=null,camOk=false,tried=false,peer=null,conn=null,mode='menu',bot=false,sid=0,sendT=0,lastVT=-1;
+const me={hp:100,mana:100,ult:0},op={hp:100,sx:.5,sy:.3,on:false,ax:.5};
+let shots=[],fx=[],hands=[],flash=0,shake=0,cd=0,chargeT=0,sizeH=[],prevPinch=false,botT=2,botX=.5,clock=0;
+let inp={sh:null,ax:.5,ay:.7,fire:false,ult:false,orb:null};
+const mouse={x:.5,y:.7},keys={};
+
+/* ---------- camera + hand tracking ---------- */
+async function initCam(){
+  if(tried)return;tried=true;
+  st('Loading hand tracking…');
+  try{
+    const fs=await FilesetResolver.forVisionTasks('https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm');
+    for(const d of ['GPU','CPU']){
+      try{hl=await HandLandmarker.createFromOptions(fs,{baseOptions:{modelAssetPath:'https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task',delegate:d},runningMode:'VIDEO',numHands:2});break}catch(e){if(d==='CPU')throw e}
+    }
+    vid.srcObject=await navigator.mediaDevices.getUserMedia({video:{width:640,height:480,facingMode:'user'}});
+    await vid.play();camOk=true;
+  }catch(e){
+    st('Camera or hand tracking unavailable ('+(e.message||e)+'). Mouse mode: move to aim, click to fire, hold S for shield, U for ultimate.');
+  }
+}
+const dd=(a,b)=>Math.hypot(a.x-b.x,a.y-b.y);
+const sz=l=>dd(l[0],l[9]);
+const open=l=>[8,12,16,20].every(t=>dd(l[t],l[0])>dd(l[t-2],l[0])*1.1);
+
+function readHands(dt){
+  if(vid.currentTime===lastVT)return;lastVT=vid.currentTime;
+  let r;try{r=hl.detectForVideo(vid,performance.now())}catch(e){return}
+  const hs=r.landmarks.map(l=>({l}));
+  hands=hs.map(h=>h.l);
+  let L=null,R=null;
+  if(hs.length===2){hs.sort((a,b)=>b.l[9].x-a.l[9].x);L=hs[0];R=hs[1]}   // video is unmirrored: larger x = user's left
+  else if(hs.length===1){open(hs[0].l)?L=hs[0]:R=hs[0]}
+  inp.sh=null;inp.orb=null;
+  if(L&&open(L.l)){const p=L.l[9];inp.sh={x:1-p.x,y:p.y,r:Math.max(.07*S,Math.min(.17*S,sz(L.l)*W*.8))}}
+  if(R){
+    const t=R.l[8];inp.ax=1-t.x;inp.ay=t.y;
+    const pin=dd(R.l[4],R.l[8])<sz(R.l)*.4;
+    if(pin&&!prevPinch)inp.fire=true;prevPinch=pin;
+  }else prevPinch=false;
+  if(L&&R){
+    const a=L.l[9],b=R.l[9];
+    const near=Math.hypot((a.x-b.x)*W,(a.y-b.y)*H)<.3*S;
+    chargeT=near?chargeT+.033:Math.max(0,chargeT-.066);
+    inp.orb={x:1-(a.x+b.x)/2,y:(a.y+b.y)/2};
+    const avg=(sz(L.l)+sz(R.l))/2,now=performance.now();
+    sizeH.push({t:now,s:avg});while(sizeH.length&&now-sizeH[0].t>500)sizeH.shift();
+    const mn=Math.min(...sizeH.map(q=>q.s));
+    if(chargeT>.4&&me.ult>=100&&avg>mn*1.35)inp.ult=true;
+  }else{chargeT=Math.max(0,chargeT-.066);sizeH=[]}
+}
+function mouseInput(){
+  inp.ax=mouse.x;inp.ay=mouse.y;inp.orb=null;
+  inp.sh=keys.s?{x:mouse.x,y:mouse.y,r:.12*S}:null;
+}
+addEventListener('mousemove',e=>{mouse.x=e.clientX/W;mouse.y=e.clientY/H});
+addEventListener('mousedown',e=>{if(mode==='play'&&e.target===cv)inp.fire=true});
+addEventListener('keydown',e=>{const k=e.key.toLowerCase();keys[k]=1;if(k==='u')inp.ult=true;if(k===' ')inp.fire=true});
+addEventListener('keyup',e=>{keys[e.key.toLowerCase()]=0});
+
+/* ---------- networking ---------- */
+const send=m=>{if(conn&&conn.open)conn.send(m)};
+function setConn(c){
+  conn=c;
+  c.on('open',()=>begin());
+  c.on('data',onMsg);
+  c.on('close',()=>{if(mode==='play')end(true,'Your opponent left the arena.')});
+}
+function hostRoom(){
+  const code=Math.floor(1000+Math.random()*9000);
+  peer=new Peer('wizduel-'+code);
+  peer.on('open',()=>st('Room code: '+code+'. Share it with your opponent and wait here.'));
+  peer.on('connection',setConn);
+  peer.on('error',e=>{if(e.type==='unavailable-id')hostRoom();else st('Network error: '+e.type)});
+}
+function joinRoom(code){
+  st('Connecting…');
+  peer=new Peer();
+  peer.on('open',()=>setConn(peer.connect('wizduel-'+code,{reliable:true})));
+  peer.on('error',e=>st(e.type==='peer-unavailable'?'No room with that code. Check it and try again.':'Network error: '+e.type));
+}
+function onMsg(m){
+  if(m.t==='f')shots.push({id:m.id,x:1-m.x,p:0,T:m.k==='u'?1.9:1.3,k:m.k,mine:0});
+  else if(m.t==='r'){
+    const i=shots.findIndex(q=>q.mine&&q.id===m.id);
+    if(i>=0){const s=shots[i];burst(s.x*W,(1-Math.min(1,s.p))*H,m.b?'#5ee7ff':'#ff8a3d',s.k==='u'?2:1);if(!m.b)me.ult=Math.min(100,me.ult+12);shots.splice(i,1)}
+  }
+  else if(m.t==='p')Object.assign(op,{sx:1-m.sx,sy:1-m.sy,on:m.on,ax:1-m.ax,hp:m.hp});
+  else if(m.t==='d')end(true);
+}
+
+/* ---------- game flow ---------- */
+function begin(){
+  Object.assign(me,{hp:100,mana:100,ult:0});Object.assign(op,{hp:100,on:false,sx:.5,sy:.3,ax:.5});
+  shots=[];fx=[];chargeT=0;sizeH=[];mode='play';
+  $('menu').style.display='none';
+}
+function end(win,note){
+  mode='over';$('menu').style.display='flex';
+  $('msg').textContent=(win?'Victory. ':'Defeat. ')+(note||'');
+  $('panel').querySelectorAll('.row,.how').forEach(e=>e.style.display='none');
+  $('st').innerHTML='<button id="again">Duel again</button>';
+  $('again').onclick=()=>location.reload();
+}
+function launch(k,x){
+  const s={id:++sid,x,p:0,T:k==='u'?1.9:1.3,k,mine:1};shots.push(s);send({t:'f',id:s.id,x,k});
+}
+function hurt(n){
+  me.hp=Math.max(0,me.hp-n);flash=.35;shake=.25;
+  if(me.hp<=0){send({t:'d'});end(false,'Your wards have fallen.')}
+}
+function burst(x,y,c,n){fx.push({x,y,c,t:0,n})}
+
+function update(dt){
+  clock+=dt;
+  if(camOk)readHands(dt);else mouseInput();
+  cd-=dt;
+  if(inp.fire&&cd<=0&&me.mana>=12){me.mana-=12;cd=.45;launch('f',inp.ax)}
+  inp.fire=false;
+  if(inp.ult&&me.ult>=100){me.ult=0;chargeT=0;sizeH=[];launch('u',inp.orb?inp.orb.x:inp.ax)}
+  inp.ult=false;
+  const shieldOn=!!inp.sh&&me.mana>0;
+  if(shieldOn)me.mana=Math.max(0,me.mana-10*dt);else me.mana=Math.min(100,me.mana+9*dt);
+  me.ult=Math.min(100,me.ult+3*dt);
+  const sh=shieldOn?inp.sh:null;
+
+  for(let i=shots.length-1;i>=0;i--){
+    const s=shots[i];s.p+=dt/s.T;
+    if(!s.mine){
+      const px=s.x*W,py=s.p*H,R=s.k==='u'?.15*S:.035*S;
+      if(sh&&Math.hypot(px-sh.x*W,py-sh.y*H)<sh.r+R*(s.k==='u'?.5:1)){
+        burst(px,py,'#5ee7ff',s.k==='u'?2:1);send({t:'r',id:s.id,b:1});shots.splice(i,1);
+        if(s.k==='u')hurt(17);
+      }else if(s.p>=1){
+        burst(px,H,'#ff3b6b',s.k==='u'?2:1);send({t:'r',id:s.id,b:0});shots.splice(i,1);
+        hurt(s.k==='u'?35:10);if(mode!=='play')return;
+      }
+    }else if(bot&&s.p>=1){
+      const blocked=op.on&&Math.abs(s.x-op.sx)*W<.1*S;
+      burst(s.x*W,0,blocked?'#5ee7ff':'#ff8a3d',s.k==='u'?2:1);
+      if(!blocked){op.hp=Math.max(0,op.hp-(s.k==='u'?35:10));me.ult=Math.min(100,me.ult+12)}
+      shots.splice(i,1);if(op.hp<=0){end(true,'The bot is toast.');return}
+    }else if(s.p>1.2)shots.splice(i,1);
+  }
+
+  if(bot){  // practice opponent
+    op.on=Math.sin(clock*.7)>-.3;op.sx=.5+.3*Math.sin(clock*.9);
+    op.ax+=(botX-op.ax)*Math.min(1,dt*3);botT-=dt;
+    if(botT<=0){shots.push({id:++sid,x:op.ax,p:0,T:Math.random()<.15?1.9:1.3,k:'f',mine:0});shots[shots.length-1].k=shots[shots.length-1].T>1.5?'u':'f';
+      botT=1.4+Math.random()*1.6;botX=.12+Math.random()*.76}
+  }
+  sendT+=dt;
+  if(sendT>.05){sendT=0;send({t:'p',sx:inp.sh?inp.sh.x:.5,sy:inp.sh?inp.sh.y:.8,on:shieldOn,ax:inp.ax,hp:me.hp})}
+  flash=Math.max(0,flash-dt);shake=Math.max(0,shake-dt);
+  for(const f of fx)f.t+=dt*2.2;fx=fx.filter(f=>f.t<1);
+}
+
+/* ---------- drawing ---------- */
+function glow(x,y,r,c1,c2){
+  const g=ctx.createRadialGradient(x,y,0,x,y,r);g.addColorStop(0,'#fff');g.addColorStop(.25,c1);g.addColorStop(1,c2);
+  ctx.fillStyle=g;ctx.beginPath();ctx.arc(x,y,r,0,7);ctx.fill();
+}
+function ring(x,y,r,c){
+  ctx.fillStyle=c+'33';ctx.beginPath();ctx.arc(x,y,r,0,7);ctx.fill();
+  ctx.strokeStyle=c;ctx.lineWidth=4;ctx.stroke();
+}
+function bar(x,y,w,h,v,c){
+  ctx.fillStyle='rgba(0,0,0,.55)';ctx.fillRect(x,y,w,h);
+  ctx.fillStyle=c;ctx.fillRect(x,y,w*Math.max(0,v)/100,h);
+  ctx.strokeStyle='rgba(255,255,255,.4)';ctx.lineWidth=1;ctx.strokeRect(x,y,w,h);
+}
+function draw(){
+  ctx.save();
+  if(shake>0)ctx.translate((Math.random()-.5)*14*shake*4,(Math.random()-.5)*14*shake*4);
+  ctx.fillStyle='#0d0a1f';ctx.fillRect(0,0,W,H);
+  if(camOk){ctx.save();ctx.translate(W,0);ctx.scale(-1,1);ctx.globalAlpha=.5;ctx.drawImage(vid,0,0,W,H);ctx.restore()}
+  const g=ctx.createLinearGradient(0,0,0,H);g.addColorStop(0,'rgba(120,30,160,.45)');g.addColorStop(.5,'rgba(13,10,31,.2)');g.addColorStop(1,'rgba(20,50,140,.3)');
+  ctx.fillStyle=g;ctx.fillRect(0,0,W,H);
+  if(mode==='play'){
+    ctx.strokeStyle='rgba(255,255,255,.25)';ctx.setLineDash([10,12]);ctx.lineWidth=2;
+    ctx.beginPath();ctx.moveTo(0,H/2);ctx.lineTo(W,H/2);ctx.stroke();ctx.setLineDash([]);
+    // opponent
+    ctx.font=(S*.11)+'px serif';ctx.textAlign='center';ctx.textBaseline='middle';
+    ctx.fillText('🧙',op.ax*W,.1*H);
+    ctx.strokeStyle='rgba(217,70,239,.5)';ctx.lineWidth=2;ctx.beginPath();ctx.moveTo(op.ax*W,.16*H);ctx.lineTo(op.ax*W,.22*H);ctx.stroke();
+    if(op.on)ring(op.sx*W,op.sy*H,.1*S,'#d946ef');
+    // my shield
+    if(inp.sh&&me.mana>0)ring(inp.sh.x*W,inp.sh.y*H,inp.sh.r,'#5ee7ff');
+    // hand dots
+    ctx.fillStyle='rgba(255,255,255,.7)';
+    for(const l of hands)for(const p of l){ctx.beginPath();ctx.arc((1-p.x)*W,p.y*H,3,0,7);ctx.fill()}
+    // charging orb
+    if(inp.orb&&chargeT>.1){
+      const k=Math.min(1,chargeT/.4),ready=me.ult>=100;
+      glow(inp.orb.x*W,inp.orb.y*H,S*(.03+.07*k)*(1+.1*Math.sin(clock*20)),ready?'#5ee7ff':'#9a8fb8','rgba(94,231,255,0)');
+    }
+    // shots
+    for(const s of shots){
+      const x=s.x*W,y=(s.mine?1-s.p:s.p)*H,u=s.k==='u';
+      const r=u?.15*S:.035*S;
+      if(u)glow(x,y,r,s.mine?'#5ee7ff':'#ff3b6b','rgba(94,231,255,0)');
+      else glow(x,y,r*1.6,s.mine?'#ff8a3d':'#d946ef','rgba(255,138,61,0)');
+    }
+    // reticle
+    ctx.strokeStyle='#ff8a3d';ctx.lineWidth=2;ctx.beginPath();ctx.arc(inp.ax*W,inp.ay*H,14,0,7);ctx.moveTo(inp.ax*W-20,inp.ay*H);ctx.lineTo(inp.ax*W+20,inp.ay*H);ctx.moveTo(inp.ax*W,inp.ay*H-20);ctx.lineTo(inp.ax*W,inp.ay*H+20);ctx.stroke();
+    // impacts
+    for(const f of fx){ctx.strokeStyle=f.c;ctx.globalAlpha=1-f.t;ctx.lineWidth=6;ctx.beginPath();ctx.arc(f.x,f.y,f.t*S*.2*f.n,0,7);ctx.stroke();ctx.globalAlpha=1}
+    // HUD
+    const bw=Math.min(W*.4,320);
+    ctx.fillStyle='#f3ecff';ctx.font='bold 14px Georgia';ctx.textAlign='left';
+    ctx.fillText('OPPONENT',12,16);bar(12,26,bw,14,op.hp,'#d946ef');
+    ctx.fillText('YOU',12,H-86);bar(12,H-76,bw,14,me.hp,'#ff3b6b');
+    ctx.fillText('MANA',12,H-52);bar(12,H-44,bw,10,me.mana,'#5ee7ff');
+    bar(12,H-28,bw,10,me.ult,me.ult>=100?'#ffd34d':'#ff8a3d');
+    ctx.fillText(me.ult>=100?'ULT READY: join hands, then thrust':'ULT',bw+20,H-20);
+  }
+  if(flash>0){ctx.fillStyle='rgba(255,40,80,'+flash*.9+')';ctx.fillRect(0,0,W,H)}
+  ctx.restore();
+}
+let last=performance.now();
+function loop(t){
+  const dt=Math.min(.05,(t-last)/1000);last=t;
+  if(mode==='play')update(dt);
+  draw();requestAnimationFrame(loop);
+}
+requestAnimationFrame(loop);
+
+/* ---------- menu ---------- */
+$('b1').onclick=async()=>{await initCam();hostRoom()};
+$('b2').onclick=async()=>{const c=$('code').value.trim();if(c.length!==4)return st('Enter the 4-digit room code.');await initCam();joinRoom(c)};
+$('b3').onclick=async()=>{await initCam();bot=true;begin()};
+</script>
 </body>
 </html>
