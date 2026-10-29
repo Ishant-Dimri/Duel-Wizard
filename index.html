@@ -1,0 +1,38 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1">
+<title>Duel of Wizards</title>
+<link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+<canvas id="c"></canvas>
+<video id="v" playsinline muted></video>
+<button id="mute" aria-label="Toggle sound">Sound on</button>
+
+<div id="menu" class="screen"><div class="panel">
+  <h1>Duel of Wizards</h1>
+  <p id="msg">Two wizards. One arena. Your hands are the spells.</p>
+  <div class="how">
+    <b>Left palm, open:</b> shield where your palm is.<br>
+    <b>Right index finger:</b> aim. <b>Pinch</b> thumb and index to fire.<br>
+    <b>Both hands together, then thrust at the screen:</b> ultimate (needs a full ULT bar).<br>
+    Stand back so both hands fit in view. Good light helps.
+  </div>
+  <div class="row"><button id="b1">Create room</button></div>
+  <div class="row"><input id="code" inputmode="numeric" maxlength="4" placeholder="1234" aria-label="Room code"><button id="b2" class="alt">Join room</button></div>
+  <div class="row"><button id="b3" class="alt">Practice vs bot</button></div>
+  <div id="st"></div>
+</div></div>
+
+<div id="over" class="screen" hidden><div class="panel">
+  <h1 id="result"></h1>
+  <p id="note"></p>
+  <div class="row"><button id="again">Rematch</button><button id="leave" class="alt">Main menu</button></div>
+</div></div>
+
+<script src="https://cdn.jsdelivr.net/npm/peerjs@1.5.4/dist/peerjs.min.js"></script>
+<script type="module" src="js/main.js"></script>
+</body>
+</html>
